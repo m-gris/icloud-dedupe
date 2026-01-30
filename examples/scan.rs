@@ -24,11 +24,16 @@ fn main() {
     // Normalize path early so warnings print before progress bar
     let normalized = normalize_path(&path);
 
-    println!("Scanning: {}", normalized.display());
+    // Print any path normalization warnings
+    for warning in &normalized.warnings {
+        eprintln!("Note: {}", warning);
+    }
+
+    println!("Scanning: {}", normalized.path.display());
     println!();
 
     let config = ScanConfig {
-        roots: vec![normalized],
+        roots: vec![normalized.path],
         ..Default::default()
     };
 
@@ -69,10 +74,11 @@ fn main() {
     progress.set_message("Verifying (parallel)...");
 
     // Parallel verification - each candidate hashes independent files
+    // Return path with result so we can track errors
     let results: Vec<_> = candidates
         .par_iter()
         .progress_with(progress.clone())
-        .map(|candidate| verify_candidate(candidate))
+        .map(|candidate| (candidate.path.clone(), verify_candidate(candidate)))
         .collect();
 
     progress.finish_with_message("Done!");
@@ -80,7 +86,7 @@ fn main() {
     // Build report from results (sequential - mutating shared struct)
     let mut report = ScanReport::default();
 
-    for result in results {
+    for (path, result) in results {
         match result {
             Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
                 let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
@@ -113,8 +119,9 @@ fn main() {
             }) => {
                 report.content_diverged.push((conflict_path, original_path));
             }
-            Err(_) => {
-                // Skip files we can't read
+            Err(e) => {
+                // Track files we couldn't read
+                report.skipped.push((path, e.to_string()));
             }
         }
     }
@@ -148,6 +155,14 @@ fn main() {
         println!();
     }
 
+    if !report.skipped.is_empty() {
+        println!("=== Skipped (read errors) ===");
+        for (path, error) in &report.skipped {
+            println!("  {} - {}", path.display(), error);
+        }
+        println!();
+    }
+
     // Summary with human-readable sizes
     let total_duplicates: usize = report
         .confirmed_duplicates
@@ -160,6 +175,9 @@ fn main() {
     println!("Total duplicates:   {}", total_duplicates);
     println!("Orphaned conflicts: {}", report.orphaned_conflicts.len());
     println!("Diverged files:     {}", report.content_diverged.len());
+    if !report.skipped.is_empty() {
+        println!("Skipped (errors):   {}", report.skipped.len());
+    }
     println!(
         "Space recoverable:  {}",
         format_size(report.bytes_recoverable, BINARY)

@@ -21,22 +21,34 @@ use crate::types::ConflictPattern;
 // PATH UTILITIES
 // ============================================================================
 
-/// Normalize and expand a user-provided path.
+/// Result of normalizing a user-provided path.
+#[derive(Debug)]
+pub struct NormalizedPath {
+    /// The cleaned path ready for filesystem use.
+    pub path: PathBuf,
+    /// Warnings about path issues (caller decides whether to print).
+    pub warnings: Vec<String>,
+}
+
+/// Normalize and expand a user-provided path (pure function).
 ///
 /// Handles common shell quoting mistakes:
-/// - Expands `~` to home directory (warns if shell didn't expand it)
-/// - Normalizes `\ ` to ` ` (warns about redundant escaping)
+/// - Expands `~` to home directory
+/// - Normalizes `\ ` to ` ` (redundant escaping)
 ///
-/// Returns the cleaned path ready for filesystem use.
-pub fn normalize_path(path: &Path) -> PathBuf {
+/// Returns the cleaned path AND any warnings as data.
+/// Caller decides whether/how to display warnings.
+pub fn normalize_path(path: &Path) -> NormalizedPath {
     let path_str = path.to_string_lossy();
     let mut normalized = path_str.to_string();
+    let mut warnings = Vec::new();
 
     // Check for redundant backslash escapes (e.g., "Mobile\ Documents" in quotes)
     if normalized.contains("\\ ") {
-        eprintln!(
-            "Warning: Found '\\ ' in path - removing redundant escapes. \
+        warnings.push(
+            "Found '\\ ' in path - removing redundant escapes. \
              (Tip: use quotes OR backslashes, not both)"
+                .to_string(),
         );
         normalized = normalized.replace("\\ ", " ");
     }
@@ -46,19 +58,23 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 
     if needs_tilde_expansion {
         if let Some(home) = dirs::home_dir() {
-            eprintln!(
-                "Note: Expanded '~' to '{}' (shell didn't expand it due to quoting)",
+            warnings.push(format!(
+                "Expanded '~' to '{}' (shell didn't expand it due to quoting)",
                 home.display()
-            );
-            if normalized == "~" {
-                return home;
+            ));
+            let path = if normalized == "~" {
+                home
             } else {
-                return home.join(&normalized[2..]);
-            }
+                home.join(&normalized[2..])
+            };
+            return NormalizedPath { path, warnings };
         }
     }
 
-    PathBuf::from(normalized)
+    NormalizedPath {
+        path: PathBuf::from(normalized),
+        warnings,
+    }
 }
 
 // ============================================================================
@@ -76,8 +92,8 @@ pub fn scan(config: &ScanConfig) -> io::Result<ScanReport> {
     let mut report = ScanReport::default();
 
     for root in &config.roots {
-        let root = normalize_path(root);
-        let mut walker = WalkDir::new(&root);
+        let normalized = normalize_path(root);
+        let mut walker = WalkDir::new(&normalized.path);
 
         if let Some(max_depth) = config.max_depth {
             walker = walker.max_depth(max_depth);
@@ -117,8 +133,8 @@ pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>
     let mut candidates = Vec::new();
 
     for root in &config.roots {
-        let root = normalize_path(root);
-        let mut walker = WalkDir::new(&root);
+        let normalized = normalize_path(root);
+        let mut walker = WalkDir::new(&normalized.path);
 
         if let Some(max_depth) = config.max_depth {
             walker = walker.max_depth(max_depth);
@@ -291,9 +307,11 @@ fn process_candidate_group(
                     .content_diverged
                     .push((conflict_path.clone(), original_path.to_path_buf()));
             }
-            Err(_) => {
-                // Could not read conflict file, skip
-                continue;
+            Err(e) => {
+                // Track skipped files instead of silent continue
+                report
+                    .skipped
+                    .push((conflict_path.clone(), e.to_string()));
             }
         }
     }

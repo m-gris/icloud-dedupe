@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 
 use crate::types::ConflictPattern;
 
+/// Minimum index for conflict patterns.
+///
+/// iCloud creates conflicts starting at "Copy" (implicit 1), then "Copy 2", "Copy 3", etc.
+/// Similarly for numbered: "file 2.txt", "file 3.txt".
+/// Index 1 is considered the original, so conflicts start at 2.
+const MIN_CONFLICT_INDEX: u32 = 2;
+
 /// Detect if a filename matches an iCloud conflict pattern.
 ///
 /// Returns `Some(pattern)` if the filename matches, `None` otherwise.
@@ -58,7 +65,7 @@ fn detect_copy_pattern(filename: &str) -> Option<ConflictPattern> {
         // Extract the number (everything before the first '.' or end)
         let num_part = after_copy.split('.').next().unwrap_or("");
         if let Ok(index) = num_part.trim().parse::<u32>() {
-            if index >= 2 {
+            if index >= MIN_CONFLICT_INDEX {
                 return Some(ConflictPattern::Copy { index: Some(index) });
             }
         }
@@ -126,7 +133,7 @@ fn detect_numbered_pattern(filename: &str) -> Option<ConflictPattern> {
     if let Some(pos) = stem.rfind(' ') {
         let after_space = &stem[pos + 1..];
         if let Ok(index) = after_space.parse::<u32>() {
-            if index >= 2 {
+            if index >= MIN_CONFLICT_INDEX {
                 return Some(ConflictPattern::Numbered { index });
             }
         }

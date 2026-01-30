@@ -120,6 +120,8 @@ pub struct ScanReport {
     pub content_diverged: Vec<(PathBuf, PathBuf)>,
     /// Total bytes recoverable by removing duplicates.
     pub bytes_recoverable: u64,
+    /// Files skipped due to read errors (path, error message).
+    pub skipped: Vec<(PathBuf, String)>,
 }
 
 /// The manifest file tracking quarantined items.

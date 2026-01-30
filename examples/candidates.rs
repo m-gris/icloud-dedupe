@@ -20,11 +20,16 @@ fn main() {
     // Normalize path early so warnings print before header
     let normalized = normalize_path(&path);
 
-    println!("Finding conflict candidates in: {}", normalized.display());
+    // Print any path normalization warnings
+    for warning in &normalized.warnings {
+        eprintln!("Note: {}", warning);
+    }
+
+    println!("Finding conflict candidates in: {}", normalized.path.display());
     println!("(Pattern-based only — no hash verification)\n");
 
     let config = ScanConfig {
-        roots: vec![normalized],
+        roots: vec![normalized.path],
         ..Default::default()
     };
 
