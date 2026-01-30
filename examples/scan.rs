@@ -6,7 +6,8 @@ use std::env;
 use std::path::PathBuf;
 
 use humansize::{format_size, BINARY};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 use icloud_dedupe::scanner::{find_candidates, normalize_path, verify_candidate};
 use icloud_dedupe::types::{ScanConfig, ScanReport, VerificationResult};
@@ -57,7 +58,7 @@ fn main() {
         return;
     }
 
-    // Phase 2: Verification (progress bar - we know total now)
+    // Phase 2: Verification (parallel with progress bar)
     let progress = ProgressBar::new(candidates.len() as u64);
     progress.set_style(
         ProgressStyle::default_bar()
@@ -65,12 +66,22 @@ fn main() {
             .unwrap()
             .progress_chars("█▓░"),
     );
-    progress.set_message("Verifying...");
+    progress.set_message("Verifying (parallel)...");
 
+    // Parallel verification - each candidate hashes independent files
+    let results: Vec<_> = candidates
+        .par_iter()
+        .progress_with(progress.clone())
+        .map(|candidate| verify_candidate(candidate))
+        .collect();
+
+    progress.finish_with_message("Done!");
+
+    // Build report from results (sequential - mutating shared struct)
     let mut report = ScanReport::default();
 
-    for candidate in &candidates {
-        match verify_candidate(candidate) {
+    for result in results {
+        match result {
             Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
                 let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
                 report.bytes_recoverable += size;
@@ -106,10 +117,7 @@ fn main() {
                 // Skip files we can't read
             }
         }
-        progress.inc(1);
     }
-
-    progress.finish_with_message("Done!");
     println!();
 
     // Output results
