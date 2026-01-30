@@ -10,3 +10,8 @@ keywords = ["icloud", "macos", "duplicate", "dedup", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+blake3 = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
