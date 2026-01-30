@@ -17,6 +17,54 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::ConflictPattern;
 
+// ============================================================================
+// PATH UTILITIES
+// ============================================================================
+
+/// Normalize and expand a user-provided path.
+///
+/// Handles common shell quoting mistakes:
+/// - Expands `~` to home directory (warns if shell didn't expand it)
+/// - Normalizes `\ ` to ` ` (warns about redundant escaping)
+///
+/// Returns the cleaned path ready for filesystem use.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    let mut normalized = path_str.to_string();
+
+    // Check for redundant backslash escapes (e.g., "Mobile\ Documents" in quotes)
+    if normalized.contains("\\ ") {
+        eprintln!(
+            "Warning: Found '\\ ' in path - removing redundant escapes. \
+             (Tip: use quotes OR backslashes, not both)"
+        );
+        normalized = normalized.replace("\\ ", " ");
+    }
+
+    // Check for unexpanded tilde
+    let needs_tilde_expansion = normalized.starts_with("~/") || normalized == "~";
+
+    if needs_tilde_expansion {
+        if let Some(home) = dirs::home_dir() {
+            eprintln!(
+                "Note: Expanded '~' to '{}' (shell didn't expand it due to quoting)",
+                home.display()
+            );
+            if normalized == "~" {
+                return home;
+            } else {
+                return home.join(&normalized[2..]);
+            }
+        }
+    }
+
+    PathBuf::from(normalized)
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
 /// Scan directories for iCloud conflict duplicates.
 ///
 /// Walks the directory tree, identifies conflict-patterned files,
@@ -28,7 +76,8 @@ pub fn scan(config: &ScanConfig) -> io::Result<ScanReport> {
     let mut report = ScanReport::default();
 
     for root in &config.roots {
-        let mut walker = WalkDir::new(root);
+        let root = normalize_path(root);
+        let mut walker = WalkDir::new(&root);
 
         if let Some(max_depth) = config.max_depth {
             walker = walker.max_depth(max_depth);
@@ -68,7 +117,8 @@ pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>
     let mut candidates = Vec::new();
 
     for root in &config.roots {
-        let mut walker = WalkDir::new(root);
+        let root = normalize_path(root);
+        let mut walker = WalkDir::new(&root);
 
         if let Some(max_depth) = config.max_depth {
             walker = walker.max_depth(max_depth);

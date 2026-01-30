@@ -11,6 +11,7 @@ categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 blake3 = "1"
+dirs = "6.0.0"
 walkdir = "2"
 
 [dev-dependencies]
