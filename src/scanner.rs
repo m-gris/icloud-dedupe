@@ -105,9 +105,9 @@ fn process_candidate_group(
     conflict_paths: &[PathBuf],
     report: &mut ScanReport,
 ) -> io::Result<()> {
-    // Check if original exists
-    if !original_path.exists() {
-        // Orphaned conflicts
+    // Check if original exists and is a file (not a directory/bundle)
+    if !original_path.exists() || !original_path.is_file() {
+        // Orphaned conflicts (or original is a bundle we can't hash)
         for path in conflict_paths {
             report.orphaned_conflicts.push(path.clone());
         }
