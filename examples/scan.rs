@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use humansize::{format_size, BINARY};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use icloud_dedupe::scanner::{find_candidates, verify_candidate};
+use icloud_dedupe::scanner::{find_candidates, normalize_path, verify_candidate};
 use icloud_dedupe::types::{ScanConfig, ScanReport, VerificationResult};
 
 fn main() {
@@ -20,11 +20,14 @@ fn main() {
         env::current_dir().expect("Failed to get current directory")
     };
 
-    println!("Scanning: {}", path.display());
+    // Normalize path early so warnings print before progress bar
+    let normalized = normalize_path(&path);
+
+    println!("Scanning: {}", normalized.display());
     println!();
 
     let config = ScanConfig {
-        roots: vec![path],
+        roots: vec![normalized],
         ..Default::default()
     };
 

@@ -5,7 +5,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use icloud_dedupe::scanner::find_candidates;
+use icloud_dedupe::scanner::{find_candidates, normalize_path};
 use icloud_dedupe::types::ScanConfig;
 
 fn main() {
@@ -17,11 +17,14 @@ fn main() {
         env::current_dir().expect("Failed to get current directory")
     };
 
-    println!("Finding conflict candidates in: {}", path.display());
+    // Normalize path early so warnings print before header
+    let normalized = normalize_path(&path);
+
+    println!("Finding conflict candidates in: {}", normalized.display());
     println!("(Pattern-based only — no hash verification)\n");
 
     let config = ScanConfig {
-        roots: vec![path],
+        roots: vec![normalized],
         ..Default::default()
     };
 
