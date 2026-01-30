@@ -1,0 +1,12 @@
+[package]
+name = "icloud-dedupe"
+version = "0.1.0"
+edition = "2024"
+authors = ["Marc Gris"]
+description = "CLI tool for detecting and removing iCloud sync conflict duplicates on macOS"
+repository = "https://github.com/m-gris/icloud-dedupe"
+license = "MIT"
+keywords = ["icloud", "macos", "duplicate", "dedup", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
