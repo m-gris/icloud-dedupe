@@ -130,3 +130,66 @@ pub struct Manifest {
     /// All quarantined files.
     pub quarantined: Vec<QuarantineReceipt>,
 }
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+/// Output format for reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Human-readable pretty output.
+    #[default]
+    Human,
+    /// Machine-readable JSON.
+    Json,
+}
+
+/// Configuration for scanning operations.
+#[derive(Debug)]
+pub struct ScanConfig {
+    /// Root directories to scan.
+    pub roots: Vec<PathBuf>,
+    /// Maximum directory depth (None = unlimited).
+    pub max_depth: Option<usize>,
+    /// Whether to follow symbolic links.
+    pub follow_symlinks: bool,
+    /// Include hidden files (dotfiles).
+    pub include_hidden: bool,
+    /// Case-insensitive pattern matching (for "copy" vs "Copy").
+    pub case_insensitive: bool,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            max_depth: None,
+            follow_symlinks: false,
+            include_hidden: true,
+            case_insensitive: true,
+        }
+    }
+}
+
+/// Configuration for quarantine operations.
+#[derive(Debug)]
+pub struct QuarantineConfig {
+    /// Directory to store quarantined files.
+    /// Default: ~/Library/Application Support/icloud-dedupe/quarantine/
+    pub quarantine_dir: PathBuf,
+    /// If true, only report what would be done without moving files.
+    pub dry_run: bool,
+    /// Preserve directory structure in quarantine.
+    pub preserve_structure: bool,
+}
+
+impl Default for QuarantineConfig {
+    fn default() -> Self {
+        Self {
+            quarantine_dir: PathBuf::new(), // Will be set at runtime
+            dry_run: false,
+            preserve_structure: true,
+        }
+    }
+}
