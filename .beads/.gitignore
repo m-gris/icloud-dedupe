@@ -37,6 +37,10 @@ beads.right.meta.json
 .sync.lock
 sync_base.jsonl
 
+# Export state tracking (local-only)
+# Contains absolute paths and sync bookkeeping between SQLite DB and JSONL
+export-state/
+
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
 # contributors to accidentally commit upstream issue databases.
