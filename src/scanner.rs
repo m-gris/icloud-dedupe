@@ -11,7 +11,11 @@ use walkdir::WalkDir;
 
 use crate::hash::{files_match, hash_file};
 use crate::pattern::{derive_original, detect_pattern};
-use crate::types::{DuplicateGroup, ScanConfig, ScanReport};
+use crate::types::{
+    ConflictCandidate, DuplicateGroup, FileKind, ScanConfig, ScanReport, VerificationResult,
+};
+#[cfg(test)]
+use crate::types::ConflictPattern;
 
 /// Scan directories for iCloud conflict duplicates.
 ///
@@ -50,6 +54,109 @@ pub fn scan_dir(path: &Path) -> io::Result<ScanReport> {
         ..Default::default()
     };
     scan(&config)
+}
+
+/// Find conflict candidates by pattern (no hash verification).
+///
+/// This is the fast, pattern-only discovery phase. Returns all files
+/// matching iCloud conflict patterns without checking if originals exist
+/// or verifying content.
+///
+/// # Errors
+/// Returns an error if a root directory cannot be read.
+pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>> {
+    let mut candidates = Vec::new();
+
+    for root in &config.roots {
+        let mut walker = WalkDir::new(root);
+
+        if let Some(max_depth) = config.max_depth {
+            walker = walker.max_depth(max_depth);
+        }
+
+        if !config.follow_symlinks {
+            walker = walker.follow_links(false);
+        }
+
+        for entry in walker.into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            // Skip directories
+            if !path.is_file() {
+                continue;
+            }
+
+            // Skip hidden files if configured
+            let filename = match path.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            if !config.include_hidden && filename.starts_with('.') {
+                continue;
+            }
+
+            // Check for conflict pattern
+            if let Some(pattern) = detect_pattern(filename) {
+                let presumed_original = derive_original(path, &pattern);
+                let kind = if path.is_dir() {
+                    FileKind::Bundle
+                } else {
+                    FileKind::Regular
+                };
+
+                candidates.push(ConflictCandidate {
+                    path: path.to_path_buf(),
+                    pattern,
+                    presumed_original,
+                    kind,
+                });
+            }
+        }
+    }
+
+    Ok(candidates)
+}
+
+/// Verify a single conflict candidate against its presumed original.
+///
+/// Checks:
+/// 1. Does the original exist?
+/// 2. Are both regular files (not bundles)?
+/// 3. Do contents match (via hash)?
+///
+/// # Errors
+/// Returns an error if files cannot be read.
+pub fn verify_candidate(candidate: &ConflictCandidate) -> io::Result<VerificationResult> {
+    let original = &candidate.presumed_original;
+    let conflict = &candidate.path;
+
+    // Check if original exists and is a regular file
+    if !original.exists() || !original.is_file() {
+        return Ok(VerificationResult::OrphanedConflict {
+            path: conflict.clone(),
+            presumed_original: original.clone(),
+        });
+    }
+
+    // Hash both files
+    let original_hash = hash_file(original)?;
+    let conflict_hash = hash_file(conflict)?;
+
+    if original_hash == conflict_hash {
+        Ok(VerificationResult::ConfirmedDuplicate {
+            keep: original.clone(),
+            remove: conflict.clone(),
+            hash: original_hash,
+        })
+    } else {
+        Ok(VerificationResult::ContentDiverged {
+            conflict_path: conflict.clone(),
+            original_path: original.clone(),
+            conflict_hash,
+            original_hash,
+        })
+    }
 }
 
 // ============================================================================
@@ -297,6 +404,131 @@ mod tests {
 
         assert_eq!(report.confirmed_duplicates.len(), 1);
     }
+
+    // --- find_candidates tests (pattern-only, no hashing) ---
+
+    #[test]
+    fn test_find_candidates_returns_candidates() {
+        let dir = setup_test_dir();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let candidates = find_candidates(&config).unwrap();
+
+        // Should find 2 candidates: "document Copy.txt" and "document Copy 2.txt"
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_find_candidates_no_hashing_occurs() {
+        // Even with diverged content, find_candidates should return them
+        let dir = setup_diverged_conflict();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let candidates = find_candidates(&config).unwrap();
+
+        // Should find the candidate (hashing hasn't happened yet)
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].path.to_string_lossy().contains("Copy"));
+    }
+
+    #[test]
+    fn test_find_candidates_includes_orphaned() {
+        let dir = setup_orphaned_conflict();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let candidates = find_candidates(&config).unwrap();
+
+        // Should find orphaned candidate (original existence not checked yet)
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_find_candidates_empty_for_no_conflicts() {
+        let dir = TempDir::new().unwrap();
+        File::create(dir.path().join("normal.txt")).unwrap();
+
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let candidates = find_candidates(&config).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    // --- verify_candidate tests (hash-based, singular) ---
+
+    #[test]
+    fn test_verify_candidate_confirmed_duplicate() {
+        let dir = TempDir::new().unwrap();
+
+        // Original and copy with same content
+        let mut orig = File::create(dir.path().join("doc.txt")).unwrap();
+        writeln!(orig, "same content").unwrap();
+        let mut copy = File::create(dir.path().join("doc Copy.txt")).unwrap();
+        writeln!(copy, "same content").unwrap();
+
+        let candidate = ConflictCandidate {
+            path: dir.path().join("doc Copy.txt"),
+            pattern: ConflictPattern::Copy { index: None },
+            presumed_original: dir.path().join("doc.txt"),
+            kind: FileKind::Regular,
+        };
+
+        let result = verify_candidate(&candidate).unwrap();
+        assert!(matches!(result, VerificationResult::ConfirmedDuplicate { .. }));
+    }
+
+    #[test]
+    fn test_verify_candidate_orphaned() {
+        let dir = TempDir::new().unwrap();
+
+        // Only the copy exists, no original
+        let mut copy = File::create(dir.path().join("missing Copy.txt")).unwrap();
+        writeln!(copy, "orphaned").unwrap();
+
+        let candidate = ConflictCandidate {
+            path: dir.path().join("missing Copy.txt"),
+            pattern: ConflictPattern::Copy { index: None },
+            presumed_original: dir.path().join("missing.txt"), // doesn't exist
+            kind: FileKind::Regular,
+        };
+
+        let result = verify_candidate(&candidate).unwrap();
+        assert!(matches!(result, VerificationResult::OrphanedConflict { .. }));
+    }
+
+    #[test]
+    fn test_verify_candidate_diverged() {
+        let dir = TempDir::new().unwrap();
+
+        // Original and copy with DIFFERENT content
+        let mut orig = File::create(dir.path().join("file.txt")).unwrap();
+        writeln!(orig, "version A").unwrap();
+        let mut copy = File::create(dir.path().join("file Copy.txt")).unwrap();
+        writeln!(copy, "version B").unwrap();
+
+        let candidate = ConflictCandidate {
+            path: dir.path().join("file Copy.txt"),
+            pattern: ConflictPattern::Copy { index: None },
+            presumed_original: dir.path().join("file.txt"),
+            kind: FileKind::Regular,
+        };
+
+        let result = verify_candidate(&candidate).unwrap();
+        assert!(matches!(result, VerificationResult::ContentDiverged { .. }));
+    }
+
+    // --- scan with config tests ---
 
     #[test]
     fn test_scan_respects_max_depth() {
