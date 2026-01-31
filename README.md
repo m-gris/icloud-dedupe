@@ -46,7 +46,55 @@ This is outside iCloud sync scope — files moved here won't re-sync.
 
 ## Status
 
-Early development. Type design phase.
+**Milestones 1-4 complete.** Core scanning works.
+
+- [x] Domain types (`src/types.rs`)
+- [x] Pattern detection (`src/pattern.rs`) — pure, no I/O
+- [x] Content hashing (`src/hash.rs`) — BLAKE3
+- [x] Scanner (`src/scanner.rs`) — parallel verification with rayon
+- [ ] Reporting (`src/report.rs`) — in progress
+- [ ] Quarantine (`src/quarantine.rs`)
+- [ ] CLI (`src/main.rs`)
+
+## Usage
+
+```bash
+# Full scan with progress bar and human-readable output
+cargo run --example scan ~/Library/Mobile\ Documents/
+
+# Pattern-only discovery (no hashing, fast)
+cargo run --example candidates ~/Documents/
+```
+
+## API Design
+
+The scanner provides a **decoupled two-phase API** for testability:
+
+```rust
+// Phase 1: Pattern matching only (fast, no hashing)
+let candidates = find_candidates(&config)?;
+
+// Phase 2: Hash verification (can be parallelized)
+for candidate in &candidates {
+    match verify_candidate(candidate)? {
+        VerificationResult::ConfirmedDuplicate { keep, remove, hash } => { ... }
+        VerificationResult::OrphanedConflict { path, .. } => { ... }
+        VerificationResult::ContentDiverged { .. } => { ... }
+    }
+}
+```
+
+This separation allows:
+- Testing pattern detection without touching the filesystem
+- Parallel hash verification with rayon
+- Progress reporting between phases
+
+## Path Handling
+
+The scanner handles common path issues:
+- Expands `~` to home directory
+- Removes redundant `\ ` escapes from shell copy-paste
+- Handles macOS bundles (`.pages`, `.logicx`) that appear as directories
 
 ## License
 
