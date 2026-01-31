@@ -2,6 +2,16 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Context Recovery
+
+If you've lost context (after compaction, `/clear`, or new session), run:
+
+```bash
+bd prime
+```
+
+This outputs the full beads workflow reference — commands, rules, session close protocol. Hooks usually call it automatically, but run it manually if you're unsure how beads works.
+
 ## Quick Reference
 
 ```bash
