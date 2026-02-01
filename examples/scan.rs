@@ -1,25 +1,36 @@
 //! Quick scan example - run with: cargo run --example scan <path>
 //!
 //! Shows progress bar during scanning and human-readable output.
+//! Use --json flag for JSON output: cargo run --example scan -- --json <path>
 
 use std::env;
 use std::path::PathBuf;
 
-use humansize::{format_size, BINARY};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
+use icloud_dedupe::report::format_report;
 use icloud_dedupe::scanner::{find_candidates, normalize_path, verify_candidate};
-use icloud_dedupe::types::{ScanConfig, ScanReport, VerificationResult};
+use icloud_dedupe::types::{OutputFormat, ScanConfig, ScanReport, VerificationResult};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let path = if args.len() > 1 {
-        PathBuf::from(&args[1])
+    // Parse --json flag
+    let json_mode = args.iter().any(|a| a == "--json");
+    let output_format = if json_mode {
+        OutputFormat::Json
     } else {
-        env::current_dir().expect("Failed to get current directory")
+        OutputFormat::Human
     };
+
+    // Find path argument (skip --json if present)
+    let path = args
+        .iter()
+        .skip(1)
+        .find(|a| *a != "--json")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().expect("Failed to get current directory"));
 
     // Normalize path early so warnings print before progress bar
     let normalized = normalize_path(&path);
@@ -127,59 +138,6 @@ fn main() {
     }
     println!();
 
-    // Output results
-    if !report.confirmed_duplicates.is_empty() {
-        println!("=== Confirmed Duplicates ===");
-        for group in &report.confirmed_duplicates {
-            println!("Original: {}", group.original.display());
-            for dup in &group.duplicates {
-                println!("  └─ {}", dup.display());
-            }
-        }
-        println!();
-    }
-
-    if !report.orphaned_conflicts.is_empty() {
-        println!("=== Orphaned Conflicts (no original found) ===");
-        for path in &report.orphaned_conflicts {
-            println!("  {}", path.display());
-        }
-        println!();
-    }
-
-    if !report.content_diverged.is_empty() {
-        println!("=== Content Diverged (different content) ===");
-        for (conflict, original) in &report.content_diverged {
-            println!("  {} ≠ {}", conflict.display(), original.display());
-        }
-        println!();
-    }
-
-    if !report.skipped.is_empty() {
-        println!("=== Skipped (read errors) ===");
-        for (path, error) in &report.skipped {
-            println!("  {} - {}", path.display(), error);
-        }
-        println!();
-    }
-
-    // Summary with human-readable sizes
-    let total_duplicates: usize = report
-        .confirmed_duplicates
-        .iter()
-        .map(|g| g.duplicates.len())
-        .sum();
-
-    println!("=== Summary ===");
-    println!("Duplicate groups:   {}", report.confirmed_duplicates.len());
-    println!("Total duplicates:   {}", total_duplicates);
-    println!("Orphaned conflicts: {}", report.orphaned_conflicts.len());
-    println!("Diverged files:     {}", report.content_diverged.len());
-    if !report.skipped.is_empty() {
-        println!("Skipped (errors):   {}", report.skipped.len());
-    }
-    println!(
-        "Space recoverable:  {}",
-        format_size(report.bytes_recoverable, BINARY)
-    );
+    // Output formatted report
+    print!("{}", format_report(&report, output_format));
 }
