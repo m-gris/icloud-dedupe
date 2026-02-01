@@ -204,6 +204,7 @@ dependencies = [
  "dirs",
  "humansize",
  "indicatif",
+ "libc",
  "rayon",
  "serde",
  "serde_json",
