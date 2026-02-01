@@ -2,6 +2,7 @@
 //!
 //! Pass 4: Complete types with fields and attributes.
 
+use serde::Serialize;
 use std::path::PathBuf;
 
 // ============================================================================
@@ -13,6 +14,22 @@ use std::path::PathBuf;
 /// Wraps a 32-byte hash (SHA-256 or BLAKE3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContentHash(pub [u8; 32]);
+
+impl ContentHash {
+    /// Returns the hash as a lowercase hex string.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+impl Serialize for ContentHash {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
 
 // ============================================================================
 // ENUMS
@@ -80,7 +97,7 @@ pub struct ConflictCandidate {
 }
 
 /// A group of confirmed duplicates sharing the same content.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct DuplicateGroup {
     /// The file to keep (clean name).
     pub original: PathBuf,
@@ -110,7 +127,7 @@ pub struct QuarantineReceipt {
 }
 
 /// Complete scan results partitioned by outcome.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ScanReport {
     /// Groups of confirmed duplicates.
     pub confirmed_duplicates: Vec<DuplicateGroup>,
