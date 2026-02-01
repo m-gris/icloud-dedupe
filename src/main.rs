@@ -4,8 +4,12 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use humansize::{format_size, BINARY};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 use icloud_dedupe::platform::{detect_icloud, ICloudState};
 use icloud_dedupe::quarantine::{
@@ -15,7 +19,8 @@ use icloud_dedupe::quarantine::{
 use icloud_dedupe::report::format_report;
 use icloud_dedupe::scanner::{find_candidates, normalize_path, verify_candidate};
 use icloud_dedupe::types::{
-    DuplicateGroup, OutputFormat, QuarantineConfig, ScanConfig, ScanReport, VerificationResult,
+    ConflictCandidate, DuplicateGroup, OutputFormat, QuarantineConfig, ScanConfig, ScanReport,
+    VerificationResult,
 };
 
 #[derive(Parser)]
@@ -152,6 +157,34 @@ fn resolve_scan_path(path: Option<PathBuf>) -> Result<PathBuf, String> {
 }
 
 // ============================================================================
+// PROGRESS HELPERS
+// ============================================================================
+
+fn spinner(msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
+}
+
+fn progress_bar(total: u64, msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+    pb.set_message(msg.to_string());
+    pb
+}
+
+// ============================================================================
 // COMMAND HANDLERS
 // ============================================================================
 
@@ -164,7 +197,9 @@ fn cmd_scan(path: Option<PathBuf>, format: OutputFormat, max_depth: Option<usize
         eprintln!("Note: {}", warning);
     }
 
-    if format == OutputFormat::Human {
+    let show_progress = format == OutputFormat::Human;
+
+    if show_progress {
         eprintln!("Scanning: {}", normalized.path.display());
         eprintln!();
     }
@@ -175,10 +210,26 @@ fn cmd_scan(path: Option<PathBuf>, format: OutputFormat, max_depth: Option<usize
         ..Default::default()
     };
 
-    let candidates = find_candidates(&config).map_err(|e| e.to_string())?;
+    // Phase 1: Discovery
+    let sp = if show_progress {
+        Some(spinner("Discovering conflict patterns..."))
+    } else {
+        None
+    };
+
+    let candidates = find_candidates(&config).map_err(|e| {
+        if let Some(s) = &sp {
+            s.finish_and_clear();
+        }
+        e.to_string()
+    })?;
+
+    if let Some(s) = sp {
+        s.finish_with_message(format!("Found {} candidates", candidates.len()));
+    }
 
     if candidates.is_empty() {
-        if format == OutputFormat::Human {
+        if show_progress {
             println!("No conflict patterns found.");
         } else {
             println!("{}", format_report(&ScanReport::default(), format));
@@ -186,8 +237,12 @@ fn cmd_scan(path: Option<PathBuf>, format: OutputFormat, max_depth: Option<usize
         return Ok(());
     }
 
-    // Verify candidates and build report
-    let report = build_report(&candidates);
+    // Phase 2: Verification (parallel)
+    let report = if show_progress {
+        build_report_with_progress(&candidates)
+    } else {
+        build_report(&candidates)
+    };
 
     print!("{}", format_report(&report, format));
 
@@ -203,6 +258,7 @@ fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>
     }
 
     eprintln!("Scanning: {}", normalized.path.display());
+    eprintln!();
 
     let config = ScanConfig {
         roots: vec![normalized.path],
@@ -210,15 +266,23 @@ fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>
         ..Default::default()
     };
 
-    let candidates = find_candidates(&config).map_err(|e| e.to_string())?;
+    // Phase 1: Discovery
+    let sp = spinner("Discovering conflict patterns...");
+
+    let candidates = find_candidates(&config).map_err(|e| {
+        sp.finish_and_clear();
+        e.to_string()
+    })?;
+
+    sp.finish_with_message(format!("Found {} candidates", candidates.len()));
 
     if candidates.is_empty() {
         println!("No conflict patterns found.");
         return Ok(());
     }
 
-    // Verify and collect confirmed duplicates
-    let report = build_report(&candidates);
+    // Phase 2: Verification (parallel)
+    let report = build_report_with_progress(&candidates);
 
     if report.confirmed_duplicates.is_empty() {
         println!("No confirmed duplicates found.");
@@ -228,7 +292,11 @@ fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>
     let total_files: usize = report.confirmed_duplicates.iter().map(|g| g.duplicates.len()).sum();
 
     if dry_run {
-        println!("DRY RUN - would quarantine {} files:", total_files);
+        println!();
+        println!("DRY RUN - would quarantine {} files ({}):",
+            total_files,
+            format_size(report.bytes_recoverable, BINARY)
+        );
         for group in &report.confirmed_duplicates {
             for dup in &group.duplicates {
                 println!("  {}", dup.display());
@@ -237,7 +305,11 @@ fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>
         return Ok(());
     }
 
-    println!("Quarantining {} files...", total_files);
+    println!();
+    println!("Quarantining {} files ({})...",
+        total_files,
+        format_size(report.bytes_recoverable, BINARY)
+    );
 
     let quarantine_config = QuarantineConfig {
         quarantine_dir: default_quarantine_dir(),
@@ -275,7 +347,7 @@ fn cmd_restore(all: bool, id: Option<String>) -> Result<(), String> {
     }
 
     if all {
-        println!("Restoring {} files...", manifest.quarantined.len());
+        let pb = progress_bar(manifest.quarantined.len() as u64, "Restoring...");
 
         let mut restored = 0;
         let mut failed = 0;
@@ -283,16 +355,17 @@ fn cmd_restore(all: bool, id: Option<String>) -> Result<(), String> {
         for receipt in &manifest.quarantined {
             match restore_file(receipt) {
                 Ok(()) => {
-                    println!("  Restored: {}", receipt.original_path.display());
                     restored += 1;
                 }
                 Err(e) => {
-                    eprintln!("  Failed: {} - {}", receipt.original_path.display(), e);
+                    pb.println(format!("  Failed: {} - {}", receipt.original_path.display(), e));
                     failed += 1;
                 }
             }
+            pb.inc(1);
         }
 
+        pb.finish_with_message("Done");
         println!();
         println!("Restored: {}, Failed: {}", restored, failed);
     } else if let Some(id) = id {
@@ -328,9 +401,9 @@ fn cmd_purge(force: bool) -> Result<(), String> {
     let total_bytes: u64 = manifest.quarantined.iter().map(|r| r.size_bytes).sum();
 
     println!(
-        "About to permanently delete {} files ({} bytes)",
+        "About to permanently delete {} files ({})",
         manifest.quarantined.len(),
-        total_bytes
+        format_size(total_bytes, BINARY)
     );
 
     if !force {
@@ -378,16 +451,16 @@ fn cmd_status() -> Result<(), String> {
     let total_bytes: u64 = manifest.quarantined.iter().map(|r| r.size_bytes).sum();
 
     println!("Files: {}", manifest.quarantined.len());
-    println!("Total size: {} bytes", total_bytes);
+    println!("Total size: {}", format_size(total_bytes, BINARY));
     println!();
     println!("Contents:");
 
     for receipt in &manifest.quarantined {
         println!(
-            "  [{}] {} ({} bytes)",
+            "  [{}] {} ({})",
             receipt.id,
             receipt.original_path.display(),
-            receipt.size_bytes
+            format_size(receipt.size_bytes, BINARY)
         );
     }
 
@@ -395,14 +468,40 @@ fn cmd_status() -> Result<(), String> {
 }
 
 // ============================================================================
-// HELPERS
+// REPORT BUILDING
 // ============================================================================
 
-fn build_report(candidates: &[icloud_dedupe::types::ConflictCandidate]) -> ScanReport {
+/// Build report with progress bar (parallel verification).
+fn build_report_with_progress(candidates: &[ConflictCandidate]) -> ScanReport {
+    let pb = progress_bar(candidates.len() as u64, "Verifying...");
+
+    let results: Vec<_> = candidates
+        .par_iter()
+        .progress_with(pb.clone())
+        .map(|candidate| (candidate.path.clone(), verify_candidate(candidate)))
+        .collect();
+
+    pb.finish_with_message("Done");
+
+    assemble_report(results)
+}
+
+/// Build report without progress (for JSON output).
+fn build_report(candidates: &[ConflictCandidate]) -> ScanReport {
+    let results: Vec<_> = candidates
+        .par_iter()
+        .map(|candidate| (candidate.path.clone(), verify_candidate(candidate)))
+        .collect();
+
+    assemble_report(results)
+}
+
+/// Assemble report from verification results.
+fn assemble_report(results: Vec<(PathBuf, std::io::Result<VerificationResult>)>) -> ScanReport {
     let mut report = ScanReport::default();
 
-    for candidate in candidates {
-        match verify_candidate(candidate) {
+    for (path, result) in results {
+        match result {
             Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
                 let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
                 report.bytes_recoverable += size;
@@ -432,7 +531,7 @@ fn build_report(candidates: &[icloud_dedupe::types::ConflictCandidate]) -> ScanR
                 report.content_diverged.push((conflict_path, original_path));
             }
             Err(e) => {
-                report.skipped.push((candidate.path.clone(), e.to_string()));
+                report.skipped.push((path, e.to_string()));
             }
         }
     }
