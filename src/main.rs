@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use icloud_dedupe::platform::{detect_icloud, ICloudState};
 use icloud_dedupe::quarantine::{
     default_quarantine_dir, init_quarantine, load_manifest, purge_quarantine,
     quarantine_duplicates, restore_file,
@@ -30,9 +31,8 @@ struct Cli {
 enum Commands {
     /// Scan for conflict files and report findings (no modifications)
     Scan {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// Directory to scan (default: iCloud location)
+        path: Option<PathBuf>,
 
         /// Output format
         #[arg(long, value_enum, default_value = "human")]
@@ -45,9 +45,8 @@ enum Commands {
 
     /// Move confirmed duplicates to quarantine
     Quarantine {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// Directory to scan (default: iCloud location)
+        path: Option<PathBuf>,
 
         /// Preview only, don't actually move files
         #[arg(long)]
@@ -115,11 +114,50 @@ fn main() -> ExitCode {
 }
 
 // ============================================================================
+// PATH RESOLUTION
+// ============================================================================
+
+/// Resolve scan path: use provided path or detect iCloud location.
+fn resolve_scan_path(path: Option<PathBuf>) -> Result<PathBuf, String> {
+    match path {
+        Some(p) => Ok(p),
+        None => {
+            // Auto-detect iCloud location
+            let state = detect_icloud().map_err(|e| e.to_string())?;
+
+            match &state {
+                ICloudState::DriveEnabled { container, .. } => {
+                    eprintln!("Detected: {}", state);
+                    Ok(container.clone())
+                }
+                ICloudState::DriveDisabled { container } => {
+                    eprintln!("Detected: {}", state);
+                    eprintln!("Note: iCloud Drive is disabled, scanning app containers only.");
+                    Ok(container.clone())
+                }
+                ICloudState::NotConfigured { expected } => {
+                    Err(format!(
+                        "iCloud not configured.\n\
+                         Expected directory: {}\n\
+                         \n\
+                         Either:\n\
+                         - Sign in to iCloud in System Settings\n\
+                         - Specify a path explicitly: icloud-dedupe scan <path>",
+                        expected.display()
+                    ))
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // COMMAND HANDLERS
 // ============================================================================
 
-fn cmd_scan(path: PathBuf, format: OutputFormat, max_depth: Option<usize>) -> Result<(), String> {
-    let normalized = normalize_path(&path);
+fn cmd_scan(path: Option<PathBuf>, format: OutputFormat, max_depth: Option<usize>) -> Result<(), String> {
+    let resolved = resolve_scan_path(path)?;
+    let normalized = normalize_path(&resolved);
 
     // Print warnings to stderr so they don't interfere with JSON output
     for warning in &normalized.warnings {
@@ -156,8 +194,9 @@ fn cmd_scan(path: PathBuf, format: OutputFormat, max_depth: Option<usize>) -> Re
     Ok(())
 }
 
-fn cmd_quarantine(path: PathBuf, dry_run: bool, max_depth: Option<usize>) -> Result<(), String> {
-    let normalized = normalize_path(&path);
+fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>) -> Result<(), String> {
+    let resolved = resolve_scan_path(path)?;
+    let normalized = normalize_path(&resolved);
 
     for warning in &normalized.warnings {
         eprintln!("Note: {}", warning);
