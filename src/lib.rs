@@ -2,6 +2,7 @@
 
 pub mod hash;
 pub mod pattern;
+pub mod platform;
 pub mod quarantine;
 pub mod report;
 pub mod scanner;
