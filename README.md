@@ -46,24 +46,42 @@ This is outside iCloud sync scope — files moved here won't re-sync.
 
 ## Status
 
-**Milestones 1-4 complete.** Core scanning works.
+**All milestones complete.** Ready for use.
 
 - [x] Domain types (`src/types.rs`)
 - [x] Pattern detection (`src/pattern.rs`) — pure, no I/O
 - [x] Content hashing (`src/hash.rs`) — BLAKE3
 - [x] Scanner (`src/scanner.rs`) — parallel verification with rayon
-- [ ] Reporting (`src/report.rs`) — in progress
-- [ ] Quarantine (`src/quarantine.rs`)
-- [ ] CLI (`src/main.rs`)
+- [x] Reporting (`src/report.rs`) — human + JSON formats
+- [x] Quarantine (`src/quarantine.rs`) — move, restore, purge
+- [x] CLI (`src/main.rs`) — full command-line interface
+
+## Installation
+
+```bash
+cargo install --path .
+```
 
 ## Usage
 
 ```bash
-# Full scan with progress bar and human-readable output
-cargo run --example scan ~/Library/Mobile\ Documents/
+# Scan and report (no modifications)
+icloud-dedupe scan ~/Library/Mobile\ Documents/
+icloud-dedupe scan ~/Documents --format json
 
-# Pattern-only discovery (no hashing, fast)
-cargo run --example candidates ~/Documents/
+# Move duplicates to quarantine
+icloud-dedupe quarantine ~/Documents
+icloud-dedupe quarantine ~/Documents --dry-run  # preview only
+
+# View quarantine contents
+icloud-dedupe status
+
+# Restore from quarantine
+icloud-dedupe restore --all
+icloud-dedupe restore <receipt-id>
+
+# Permanently delete quarantined files
+icloud-dedupe purge
 ```
 
 ## API Design
