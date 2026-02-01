@@ -65,13 +65,16 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Scan and report (no modifications)
-icloud-dedupe scan ~/Library/Mobile\ Documents/
-icloud-dedupe scan ~/Documents --format json
+# Scan iCloud (auto-detects location)
+icloud-dedupe scan
+icloud-dedupe scan --format json
+
+# Scan specific path
+icloud-dedupe scan ~/Documents
 
 # Move duplicates to quarantine
-icloud-dedupe quarantine ~/Documents
-icloud-dedupe quarantine ~/Documents --dry-run  # preview only
+icloud-dedupe quarantine              # iCloud
+icloud-dedupe quarantine --dry-run    # preview only
 
 # View quarantine contents
 icloud-dedupe status
@@ -83,6 +86,8 @@ icloud-dedupe restore <receipt-id>
 # Permanently delete quarantined files
 icloud-dedupe purge
 ```
+
+The tool auto-detects your iCloud location (`~/Library/Mobile Documents/`) when no path is specified. If iCloud isn't configured, it tells you what it expected to find.
 
 ## API Design
 
