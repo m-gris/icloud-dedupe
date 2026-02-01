@@ -2,7 +2,7 @@
 //!
 //! Pass 4: Complete types with fields and attributes.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 // ============================================================================
@@ -29,6 +29,30 @@ impl Serialize for ContentHash {
     {
         serializer.serialize_str(&self.to_hex())
     }
+}
+
+impl<'de> Deserialize<'de> for ContentHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let hex_str = String::deserialize(deserializer)?;
+        let bytes = hex_to_bytes(&hex_str).map_err(serde::de::Error::custom)?;
+        Ok(ContentHash(bytes))
+    }
+}
+
+/// Parse a 64-character hex string into 32 bytes.
+fn hex_to_bytes(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 {
+        return Err(format!("Expected 64 hex chars, got {}", hex.len()));
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
+        bytes[i] = u8::from_str_radix(s, 16).map_err(|e| e.to_string())?;
+    }
+    Ok(bytes)
 }
 
 // ============================================================================
@@ -108,7 +132,7 @@ pub struct DuplicateGroup {
 }
 
 /// Record of a quarantined file (for restore).
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineReceipt {
     /// Unique identifier for this receipt.
     pub id: String,
@@ -142,7 +166,7 @@ pub struct ScanReport {
 }
 
 /// The manifest file tracking quarantined items.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Manifest format version.
     pub version: u32,
