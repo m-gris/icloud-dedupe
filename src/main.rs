@@ -17,7 +17,7 @@ use icloud_dedupe::quarantine::{
     quarantine_duplicates, restore_file,
 };
 use icloud_dedupe::report::format_report;
-use icloud_dedupe::scanner::{find_candidates, normalize_path, verify_candidate};
+use icloud_dedupe::scanner::{find_candidates, find_candidates_with_progress, normalize_path, verify_candidate};
 use icloud_dedupe::types::{
     ConflictCandidate, DuplicateGroup, OutputFormat, QuarantineConfig, ScanConfig, ScanReport,
     VerificationResult,
@@ -211,22 +211,30 @@ fn cmd_scan(path: Option<PathBuf>, format: OutputFormat, max_depth: Option<usize
     };
 
     // Phase 1: Discovery
-    let sp = if show_progress {
-        Some(spinner("Discovering conflict patterns..."))
-    } else {
-        None
-    };
-
-    let candidates = find_candidates(&config).map_err(|e| {
-        if let Some(s) = &sp {
-            s.finish_and_clear();
+    let candidates = if show_progress {
+        let sp = spinner("Discovering conflict patterns...");
+        let result = find_candidates_with_progress(&config, |scanned, found| {
+            sp.set_message(format!(
+                "Scanned {} files, found {} candidates...",
+                scanned, found
+            ));
+        });
+        match result {
+            Ok(c) => {
+                sp.finish_with_message(format!(
+                    "Scanned files, found {} candidates",
+                    c.len()
+                ));
+                c
+            }
+            Err(e) => {
+                sp.finish_and_clear();
+                return Err(e.to_string());
+            }
         }
-        e.to_string()
-    })?;
-
-    if let Some(s) = sp {
-        s.finish_with_message(format!("Found {} candidates", candidates.len()));
-    }
+    } else {
+        find_candidates(&config).map_err(|e| e.to_string())?
+    };
 
     if candidates.is_empty() {
         if show_progress {
@@ -269,10 +277,21 @@ fn cmd_quarantine(path: Option<PathBuf>, dry_run: bool, max_depth: Option<usize>
     // Phase 1: Discovery
     let sp = spinner("Discovering conflict patterns...");
 
-    let candidates = find_candidates(&config).map_err(|e| {
-        sp.finish_and_clear();
-        e.to_string()
-    })?;
+    let candidates = match find_candidates_with_progress(&config, |scanned, found| {
+        sp.set_message(format!(
+            "Scanned {} files, found {} candidates...",
+            scanned, found
+        ));
+    }) {
+        Ok(c) => {
+            sp.finish_with_message(format!("Scanned files, found {} candidates", c.len()));
+            c
+        }
+        Err(e) => {
+            sp.finish_and_clear();
+            return Err(e.to_string());
+        }
+    };
 
     sp.finish_with_message(format!("Found {} candidates", candidates.len()));
 

@@ -130,7 +130,21 @@ pub fn scan_dir(path: &Path) -> io::Result<ScanReport> {
 /// # Errors
 /// Returns an error if a root directory cannot be read.
 pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>> {
+    find_candidates_with_progress(config, |_, _| {})
+}
+
+/// Find conflict candidates with progress reporting.
+///
+/// The callback receives (files_scanned, candidates_found) after each file.
+pub fn find_candidates_with_progress<F>(
+    config: &ScanConfig,
+    mut on_progress: F,
+) -> io::Result<Vec<ConflictCandidate>>
+where
+    F: FnMut(usize, usize),
+{
     let mut candidates = Vec::new();
+    let mut files_scanned: usize = 0;
 
     for root in &config.roots {
         let normalized = normalize_path(root);
@@ -152,6 +166,8 @@ pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>
                 continue;
             }
 
+            files_scanned += 1;
+
             // Skip hidden files if configured
             let filename = match path.file_name().and_then(|s| s.to_str()) {
                 Some(name) => name,
@@ -159,6 +175,7 @@ pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>
             };
 
             if !config.include_hidden && filename.starts_with('.') {
+                on_progress(files_scanned, candidates.len());
                 continue;
             }
 
@@ -178,6 +195,8 @@ pub fn find_candidates(config: &ScanConfig) -> io::Result<Vec<ConflictCandidate>
                     kind,
                 });
             }
+
+            on_progress(files_scanned, candidates.len());
         }
     }
 
