@@ -6,4 +6,5 @@ pub mod platform;
 pub mod quarantine;
 pub mod report;
 pub mod scanner;
+pub mod tui;
 pub mod types;
