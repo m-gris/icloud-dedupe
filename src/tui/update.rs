@@ -128,23 +128,72 @@ fn update_duplicate_list(
                 Transition::Screen(Screen::DuplicateList { cursor, selected })
             }
         }
+        Action::ToggleSelection => {
+            let mut new_selected = selected;
+            if new_selected.contains(&cursor) {
+                new_selected.remove(&cursor);
+            } else {
+                new_selected.insert(cursor);
+            }
+            Transition::Screen(Screen::DuplicateList {
+                cursor,
+                selected: new_selected,
+            })
+        }
+        Action::SelectAll => {
+            let all: std::collections::BTreeSet<usize> = (0..len).collect();
+            Transition::Screen(Screen::DuplicateList {
+                cursor,
+                selected: all,
+            })
+        }
+        Action::SelectNone => Transition::Screen(Screen::DuplicateList {
+            cursor,
+            selected: std::collections::BTreeSet::new(),
+        }),
+        Action::Quarantine => {
+            if selected.is_empty() {
+                // Nothing selected — no-op
+                Transition::Screen(Screen::DuplicateList { cursor, selected })
+            } else {
+                let group_indices: Vec<usize> = selected.into_iter().collect();
+                Transition::Screen(Screen::confirm(group_indices))
+            }
+        }
         Action::Back => Transition::Screen(Screen::Overview),
         Action::Quit => Transition::Quit,
-        // Selection and quarantine actions handled in th0.2.2
         _ => Transition::Screen(Screen::DuplicateList { cursor, selected }),
     }
 }
 
-/// DuplicateDetail: back to list, quarantine, open folder.
+/// DuplicateDetail: back to list, quarantine single group, open folder.
 fn update_duplicate_detail(
     group_index: usize,
     action: &Action,
-    _report: &ScanReport,
+    report: &ScanReport,
 ) -> Transition {
     match action {
         Action::Back | Action::Skip => Transition::Screen(Screen::duplicate_list()),
+        Action::Quarantine => {
+            // Quarantine this single group directly (skip confirm? or go to confirm)
+            // Design says Q on detail screen quarantines — go through confirm gate.
+            Transition::Screen(Screen::confirm(vec![group_index]))
+        }
+        Action::OpenFolder => {
+            if let Some(group) = report.confirmed_duplicates.get(group_index) {
+                // Open the folder containing the original file
+                if let Some(parent) = group.original.parent() {
+                    Transition::Effect(Effect::OpenFolder {
+                        path: parent.to_path_buf(),
+                    })
+                } else {
+                    Transition::Screen(Screen::DuplicateDetail { group_index })
+                }
+            } else {
+                Transition::Screen(Screen::DuplicateDetail { group_index })
+            }
+        }
         Action::Quit => Transition::Quit,
-        // OpenFolder and Quarantine handled in th0.2.2
         _ => Transition::Screen(Screen::DuplicateDetail { group_index }),
     }
 }
@@ -353,6 +402,92 @@ mod tests {
         assert_eq!(result, Transition::Screen(Screen::Overview));
     }
 
+    #[test]
+    fn duplicate_list_toggle_selection() {
+        let report = report_with_duplicates(3);
+        let screen = Screen::DuplicateList {
+            cursor: 1,
+            selected: Default::default(),
+        };
+        // Toggle on
+        let result = update(screen, &Action::ToggleSelection, &report);
+        match result {
+            Transition::Screen(Screen::DuplicateList { cursor, selected }) => {
+                assert_eq!(cursor, 1);
+                assert!(selected.contains(&1));
+                assert_eq!(selected.len(), 1);
+
+                // Toggle off
+                let result2 = update(
+                    Screen::DuplicateList { cursor, selected },
+                    &Action::ToggleSelection,
+                    &report,
+                );
+                match result2 {
+                    Transition::Screen(Screen::DuplicateList { selected, .. }) => {
+                        assert!(selected.is_empty());
+                    }
+                    other => panic!("Expected DuplicateList, got {:?}", other),
+                }
+            }
+            other => panic!("Expected DuplicateList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_list_select_all() {
+        let report = report_with_duplicates(3);
+        let screen = Screen::duplicate_list();
+        let result = update(screen, &Action::SelectAll, &report);
+        match result {
+            Transition::Screen(Screen::DuplicateList { selected, .. }) => {
+                assert_eq!(selected.len(), 3);
+                assert!(selected.contains(&0));
+                assert!(selected.contains(&1));
+                assert!(selected.contains(&2));
+            }
+            other => panic!("Expected DuplicateList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_list_select_none() {
+        let report = report_with_duplicates(3);
+        let mut initial_selected = std::collections::BTreeSet::new();
+        initial_selected.insert(0);
+        initial_selected.insert(2);
+        let screen = Screen::DuplicateList {
+            cursor: 0,
+            selected: initial_selected,
+        };
+        let result = update(screen, &Action::SelectNone, &report);
+        match result {
+            Transition::Screen(Screen::DuplicateList { selected, .. }) => {
+                assert!(selected.is_empty());
+            }
+            other => panic!("Expected DuplicateList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_list_quarantine_with_selection_goes_to_confirm() {
+        let report = report_with_duplicates(3);
+        let mut selected = std::collections::BTreeSet::new();
+        selected.insert(0);
+        selected.insert(2);
+        let screen = Screen::DuplicateList { cursor: 0, selected };
+        let result = update(screen, &Action::Quarantine, &report);
+        assert_eq!(result, Transition::Screen(Screen::confirm(vec![0, 2])));
+    }
+
+    #[test]
+    fn duplicate_list_quarantine_without_selection_is_noop() {
+        let report = report_with_duplicates(3);
+        let screen = Screen::duplicate_list();
+        let result = update(screen, &Action::Quarantine, &report);
+        assert_eq!(result, Transition::Screen(Screen::duplicate_list()));
+    }
+
     // -- Simple lists (orphan, diverged, skipped) --
 
     #[test]
@@ -400,6 +535,30 @@ mod tests {
             &report,
         );
         assert_eq!(result, Transition::Screen(Screen::duplicate_list()));
+    }
+
+    #[test]
+    fn detail_quarantine_goes_to_confirm() {
+        let report = report_with_duplicates(3);
+        let result = update(
+            Screen::DuplicateDetail { group_index: 1 },
+            &Action::Quarantine,
+            &report,
+        );
+        assert_eq!(result, Transition::Screen(Screen::confirm(vec![1])));
+    }
+
+    #[test]
+    fn detail_open_folder_emits_effect() {
+        let report = report_with_duplicates(3);
+        let result = update(
+            Screen::DuplicateDetail { group_index: 0 },
+            &Action::OpenFolder,
+            &report,
+        );
+        // The original path is "original_0.txt" — parent is "" (current dir)
+        // In real usage paths are absolute; this tests the plumbing.
+        assert!(matches!(result, Transition::Effect(Effect::OpenFolder { .. })));
     }
 
     // -- Confirm --
