@@ -3,8 +3,15 @@
 //! This is the only module with side effects. It wires the pure layers
 //! (state, update, view) to the real terminal via crossterm and ratatui.
 //! Kept minimal — all intelligence lives in the pure layers.
+//!
+//! Architecture: two producer threads feed a single mpsc channel.
+//! - Key reader thread: forwards crossterm key events
+//! - Scanner thread: sends progress updates and the final report
+//! The event loop consumes from the channel, dispatching to pure handlers.
 
 use std::io;
+use std::sync::mpsc;
+use std::thread;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
@@ -14,10 +21,11 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::types::ScanReport;
+use crate::scanner::{find_candidates_with_progress, verify_candidate};
+use crate::types::{ScanConfig, ScanReport};
 
-use super::state::{Action, App, Screen, Transition};
-use super::update::update;
+use super::state::{Action, App, AppEvent, Screen, Transition};
+use super::update::{handle_background_event, update};
 use super::view::render;
 
 // ============================================================================
@@ -93,17 +101,113 @@ fn install_panic_hook() {
 }
 
 // ============================================================================
+// BACKGROUND THREADS
+// ============================================================================
+
+/// Spawn a thread that reads crossterm events and forwards key events to the channel.
+fn spawn_key_reader(tx: mpsc::Sender<AppEvent>) {
+    thread::spawn(move || {
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    if tx.send(AppEvent::Key(key)).is_err() {
+                        break; // receiver dropped, TUI is shutting down
+                    }
+                }
+                Ok(_) => {} // ignore mouse, resize, etc.
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Spawn a thread that runs the scanner and sends progress/completion events.
+fn spawn_scanner(config: ScanConfig, tx: mpsc::Sender<AppEvent>) {
+    thread::spawn(move || {
+        // Phase 1: Discovery
+        let tx_progress = tx.clone();
+        let candidates = match find_candidates_with_progress(&config, move |scanned, found| {
+            // Best-effort: if the receiver is gone, we'll notice on next send
+            let _ = tx_progress.send(AppEvent::ScanProgress {
+                files_scanned: scanned,
+                candidates_found: found,
+            });
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(AppEvent::ScanError(e.to_string()));
+                return;
+            }
+        };
+
+        // Phase 2: Verification (parallel with rayon)
+        use rayon::prelude::*;
+        use crate::types::{DuplicateGroup, VerificationResult};
+
+        let results: Vec<_> = candidates
+            .par_iter()
+            .map(|c| (c.path.clone(), verify_candidate(c)))
+            .collect();
+
+        // Phase 3: Assemble report
+        let mut report = ScanReport::default();
+        for (path, result) in results {
+            match result {
+                Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
+                    let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
+                    report.bytes_recoverable += size;
+                    if let Some(group) = report
+                        .confirmed_duplicates
+                        .iter_mut()
+                        .find(|g| g.original == keep)
+                    {
+                        group.duplicates.push(remove);
+                    } else {
+                        report.confirmed_duplicates.push(DuplicateGroup {
+                            original: keep,
+                            hash,
+                            duplicates: vec![remove],
+                        });
+                    }
+                }
+                Ok(VerificationResult::OrphanedConflict { path, .. }) => {
+                    report.orphaned_conflicts.push(path);
+                }
+                Ok(VerificationResult::ContentDiverged {
+                    conflict_path,
+                    original_path,
+                    ..
+                }) => {
+                    report.content_diverged.push((conflict_path, original_path));
+                }
+                Err(e) => {
+                    report.skipped.push((path, e.to_string()));
+                }
+            }
+        }
+
+        let _ = tx.send(AppEvent::ScanComplete(report));
+    });
+}
+
+// ============================================================================
 // EVENT LOOP
 // ============================================================================
 
-/// Run the TUI event loop with a completed scan report.
+/// Run the TUI event loop, scanning in the background.
 ///
-/// This is the main entry point for the TUI. It takes ownership of
-/// the terminal and runs until the user quits.
-pub fn run(report: ScanReport) -> io::Result<()> {
+/// This is the main entry point for the TUI. It sets up the terminal,
+/// spawns a scanner thread, and runs the event loop until the user quits.
+pub fn run(config: ScanConfig) -> io::Result<()> {
     install_panic_hook();
     let mut terminal = setup_terminal()?;
-    let mut app = App::with_report(report);
+    let mut app = App::scanning();
+
+    let (tx, rx) = mpsc::channel::<AppEvent>();
+
+    // Spawn producer threads
+    spawn_key_reader(tx.clone());
+    spawn_scanner(config, tx);
 
     loop {
         // Render
@@ -114,25 +218,42 @@ pub fn run(report: ScanReport) -> io::Result<()> {
             break;
         }
 
-        // Poll for events
-        if let Event::Key(key) = event::read()? {
-            if let Some(action) = map_key(key) {
-                // Take the screen out, run pure transition, put result back
-                let screen = std::mem::take(&mut app.screen);
-                let report_ref = app.report.as_ref().expect("report should exist in TUI mode");
-                let transition = update(screen, &action, report_ref);
+        // Block on next event from any producer
+        let event = match rx.recv() {
+            Ok(e) => e,
+            Err(_) => break, // all senders dropped
+        };
 
-                match transition {
-                    Transition::Screen(new_screen) => {
-                        app.screen = new_screen;
-                    }
-                    Transition::Quit => {
-                        app.should_quit = true;
-                    }
-                    Transition::Effect(effect) => {
-                        handle_effect(effect, &mut app);
+        match event {
+            AppEvent::Key(key) => {
+                if let Some(action) = map_key(key) {
+                    // During scanning, only Quit is meaningful (no report yet)
+                    if app.report.is_none() {
+                        if action == Action::Quit {
+                            app.should_quit = true;
+                        }
+                        // All other actions ignored during scanning
+                    } else {
+                        let screen = std::mem::take(&mut app.screen);
+                        let report_ref = app.report.as_ref().expect("checked above");
+                        let transition = update(screen, &action, report_ref);
+
+                        match transition {
+                            Transition::Screen(new_screen) => {
+                                app.screen = new_screen;
+                            }
+                            Transition::Quit => {
+                                app.should_quit = true;
+                            }
+                            Transition::Effect(effect) => {
+                                handle_effect(effect, &mut app);
+                            }
+                        }
                     }
                 }
+            }
+            background_event => {
+                handle_background_event(&mut app, background_event);
             }
         }
     }
@@ -152,7 +273,7 @@ fn handle_effect(effect: Effect, app: &mut App) {
     match effect {
         Effect::StartQuarantine { group_indices } => {
             // For now, transition to the progress screen.
-            // Actual quarantine execution will be wired in th0.4.2.
+            // Actual quarantine execution will be wired in k0r.
             let total: usize = group_indices
                 .iter()
                 .filter_map(|&i| app.report.as_ref()?.confirmed_duplicates.get(i))

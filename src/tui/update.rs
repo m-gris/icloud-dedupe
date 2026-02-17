@@ -264,7 +264,28 @@ fn noop(screen: Screen, action: &Action) -> Transition {
 /// This function is pure: it takes &mut App but performs no I/O.
 /// The effects boundary calls this when it receives a non-Key AppEvent.
 pub fn handle_background_event(app: &mut App, event: AppEvent) {
-    todo!("Phase 1: signature only — implementation in Phase 5")
+    match event {
+        AppEvent::ScanProgress { candidates_found, .. } => {
+            // Only update if we're still on the Scanning screen.
+            // Late-arriving progress events after completion are ignored.
+            if matches!(app.screen, Screen::Scanning { .. }) {
+                app.screen = Screen::Scanning { candidates_found };
+            }
+        }
+        AppEvent::ScanComplete(report) => {
+            app.report = Some(report);
+            app.screen = Screen::Overview;
+        }
+        AppEvent::ScanError(msg) => {
+            eprintln!("Scan error: {}", msg);
+            app.should_quit = true;
+        }
+        AppEvent::Key(_) => {
+            // Key events are handled by the event loop via map_key → update,
+            // not by this function. This arm should never be reached.
+            unreachable!("Key events should not be dispatched to handle_background_event");
+        }
+    }
 }
 
 // ============================================================================
