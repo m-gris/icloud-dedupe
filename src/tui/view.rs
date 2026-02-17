@@ -5,13 +5,15 @@
 //! functions are pure (state in, widgets out); the only effect is
 //! Frame::render_widget() which writes to the terminal buffer.
 
+use std::collections::BTreeSet;
+
 use humansize::{format_size, BINARY};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::types::ScanReport;
+use crate::types::{DuplicateGroup, ScanReport};
 
 use super::state::{App, Screen};
 use super::theme;
@@ -49,7 +51,17 @@ pub fn render(app: &App, frame: &mut Frame) {
                 render_overview(report, frame, content_area);
             }
         }
-        // Remaining screens will be added in th0.3.2 and th0.3.3
+        Screen::DuplicateList { cursor, selected } => {
+            if let Some(report) = &app.report {
+                render_duplicate_list(report, *cursor, selected, frame, content_area);
+            }
+        }
+        Screen::DuplicateDetail { group_index } => {
+            if let Some(report) = &app.report {
+                render_duplicate_detail(report, *group_index, frame, content_area);
+            }
+        }
+        // Remaining screens will be added in th0.3.3
         _ => {
             let placeholder = Paragraph::new("Screen not yet implemented")
                 .style(theme::STYLE_DIM);
@@ -237,6 +249,211 @@ fn render_overview(report: &ScanReport, frame: &mut Frame, area: Rect) {
 }
 
 // ============================================================================
+// SCREEN: DUPLICATE LIST
+// ============================================================================
+
+fn render_duplicate_list(
+    report: &ScanReport,
+    cursor: usize,
+    selected: &BTreeSet<usize>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let groups = &report.confirmed_duplicates;
+
+    // Split: list area + status bar
+    let chunks = Layout::vertical([
+        Constraint::Min(0),   // list
+        Constraint::Length(1), // selection tally
+    ])
+    .split(area);
+
+    // Build list items
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        let is_selected = selected.contains(&i);
+        let is_cursor = i == cursor;
+
+        let checkbox = if is_selected {
+            Span::styled("[x] ", theme::STYLE_CHECKED)
+        } else {
+            Span::styled("[ ] ", theme::STYLE_UNCHECKED)
+        };
+
+        let name = group_display_name(group);
+        let copies = group.duplicates.len();
+        let size: u64 = group
+            .duplicates
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+
+        let info = format!(
+            "  {} cop{}, {}",
+            copies,
+            if copies == 1 { "y" } else { "ies" },
+            format_size(size, BINARY)
+        );
+
+        let spans = vec![
+            Span::raw("  "),
+            checkbox,
+            Span::styled(name, theme::STYLE_IMPORTANT),
+            Span::styled(info, theme::STYLE_DIM),
+        ];
+
+        let line = if is_cursor {
+            Line::from(spans).style(theme::STYLE_CURSOR)
+        } else {
+            Line::from(spans)
+        };
+        lines.push(line);
+    }
+
+    // Scroll: if cursor is beyond visible area, offset the view
+    let visible_height = chunks[0].height as usize;
+    let scroll_offset = if cursor >= visible_height {
+        cursor - visible_height + 1
+    } else {
+        0
+    };
+
+    let list = Paragraph::new(lines).scroll((scroll_offset as u16, 0));
+    frame.render_widget(list, chunks[0]);
+
+    // Selection tally
+    let selected_count = selected.len();
+    let selected_size: u64 = selected
+        .iter()
+        .filter_map(|&i| groups.get(i))
+        .flat_map(|g| &g.duplicates)
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    let tally = if selected_count > 0 {
+        format!(
+            "  Selected: {} group{} ({})",
+            selected_count,
+            if selected_count == 1 { "" } else { "s" },
+            format_size(selected_size, BINARY)
+        )
+    } else {
+        "  Nothing selected".to_string()
+    };
+
+    let tally_widget = Paragraph::new(Span::styled(tally, theme::STYLE_DIM));
+    frame.render_widget(tally_widget, chunks[1]);
+}
+
+/// Extract a display name from a duplicate group (filename of original).
+fn group_display_name(group: &DuplicateGroup) -> String {
+    group
+        .original
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| group.original.display().to_string())
+}
+
+// ============================================================================
+// SCREEN: DUPLICATE DETAIL
+// ============================================================================
+
+fn render_duplicate_detail(
+    report: &ScanReport,
+    group_index: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let Some(group) = report.confirmed_duplicates.get(group_index) else {
+        let err = Paragraph::new("Group not found").style(theme::STYLE_DANGER);
+        frame.render_widget(err, area);
+        return;
+    };
+
+    let mut lines = vec![Line::from("")];
+
+    // KEEP section
+    lines.push(Line::from(Span::styled(
+        "  KEEP (original):",
+        theme::STYLE_SAFE,
+    )));
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("  {}", group.original.display()),
+            theme::STYLE_IMPORTANT,
+        ),
+    ]));
+
+    if let Ok(meta) = std::fs::metadata(&group.original) {
+        lines.push(Line::from(Span::styled(
+            format!("    Size: {}", format_size(meta.len(), BINARY)),
+            theme::STYLE_DIM,
+        )));
+        if let Ok(modified) = meta.modified() {
+            lines.push(Line::from(Span::styled(
+                format!("    Modified: {}", format_system_time(modified)),
+                theme::STYLE_DIM,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    // REMOVE section
+    lines.push(Line::from(Span::styled(
+        "  REMOVE (duplicates):",
+        theme::STYLE_DANGER,
+    )));
+
+    for dup in &group.duplicates {
+        let dup_name = dup
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dup.display().to_string());
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("• ", theme::STYLE_DANGER),
+            Span::raw(dup_name),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Hash
+    lines.push(Line::from(Span::styled(
+        format!("  Hash: {} (BLAKE3)", truncate_hash(&group.hash.to_hex())),
+        theme::STYLE_DIM,
+    )));
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Truncate a hash string for display: "abcd1234...ef567890"
+fn truncate_hash(hex: &str) -> String {
+    if hex.len() > 16 {
+        format!("{}...{}", &hex[..8], &hex[hex.len() - 8..])
+    } else {
+        hex.to_string()
+    }
+}
+
+/// Format a SystemTime as a human-readable string (without chrono dep).
+fn format_system_time(time: std::time::SystemTime) -> String {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| {
+            let secs = d.as_secs();
+            // Simple date format: days since epoch
+            let days = secs / 86400;
+            let years = 1970 + days / 365;
+            format!("~{}", years)
+        })
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -317,6 +534,75 @@ mod tests {
             .map(|cell| cell.symbol().to_string())
             .collect();
         assert!(content.contains("42"), "Buffer should contain candidate count 42");
+    }
+
+    #[test]
+    fn duplicate_list_renders_without_panic() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::DuplicateList {
+            cursor: 0,
+            selected: Default::default(),
+        };
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render should not panic");
+    }
+
+    #[test]
+    fn duplicate_list_shows_checkbox_and_filename() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        let mut selected = BTreeSet::new();
+        selected.insert(0);
+        app.screen = Screen::DuplicateList { cursor: 0, selected };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("[x]"), "Should show checked checkbox");
+        assert!(content.contains("report.pdf"), "Should show filename");
+    }
+
+    #[test]
+    fn duplicate_detail_renders_without_panic() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::DuplicateDetail { group_index: 0 };
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render should not panic");
+    }
+
+    #[test]
+    fn duplicate_detail_shows_keep_and_remove_sections() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::DuplicateDetail { group_index: 0 };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("KEEP"), "Should show KEEP section");
+        assert!(content.contains("REMOVE"), "Should show REMOVE section");
+    }
+
+    #[test]
+    fn truncate_hash_works() {
+        let full = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let short = truncate_hash(full);
+        assert_eq!(short, "abcdef01...23456789");
+
+        let tiny = "abcdef01";
+        assert_eq!(truncate_hash(tiny), "abcdef01");
     }
 
     #[test]
