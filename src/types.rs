@@ -121,7 +121,7 @@ pub struct ConflictCandidate {
 }
 
 /// A group of confirmed duplicates sharing the same content.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DuplicateGroup {
     /// The file to keep (clean name).
     pub original: PathBuf,
@@ -151,7 +151,7 @@ pub struct QuarantineReceipt {
 }
 
 /// Complete scan results partitioned by outcome.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanReport {
     /// Groups of confirmed duplicates.
     pub confirmed_duplicates: Vec<DuplicateGroup>,

@@ -6,6 +6,7 @@
 //! Frame::render_widget() which writes to the terminal buffer.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use humansize::{format_size, BINARY};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -61,11 +62,46 @@ pub fn render(app: &App, frame: &mut Frame) {
                 render_duplicate_detail(report, *group_index, frame, content_area);
             }
         }
-        // Remaining screens will be added in th0.3.3
-        _ => {
-            let placeholder = Paragraph::new("Screen not yet implemented")
-                .style(theme::STYLE_DIM);
-            frame.render_widget(placeholder, content_area);
+        Screen::OrphanList { cursor } => {
+            if let Some(report) = &app.report {
+                render_simple_list(
+                    &report.orphaned_conflicts.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    *cursor,
+                    frame,
+                    content_area,
+                );
+            }
+        }
+        Screen::DivergedList { cursor } => {
+            if let Some(report) = &app.report {
+                let items: Vec<String> = report
+                    .content_diverged
+                    .iter()
+                    .map(|(c, o)| format!("{} ≠ {}", c.display(), o.display()))
+                    .collect();
+                render_simple_list(&items, *cursor, frame, content_area);
+            }
+        }
+        Screen::SkippedList { cursor } => {
+            if let Some(report) = &app.report {
+                let items: Vec<String> = report
+                    .skipped
+                    .iter()
+                    .map(|(p, e)| format!("{}: {}", p.display(), e))
+                    .collect();
+                render_simple_list(&items, *cursor, frame, content_area);
+            }
+        }
+        Screen::Confirm { group_indices } => {
+            if let Some(report) = &app.report {
+                render_confirm(report, group_indices, frame, content_area);
+            }
+        }
+        Screen::Progress { done, total, current, errors } => {
+            render_progress(*done, *total, current.as_deref(), errors, frame, content_area);
+        }
+        Screen::Done { quarantined, failed, bytes_recovered, errors } => {
+            render_done(*quarantined, *failed, *bytes_recovered, errors, frame, content_area);
         }
     }
 }
@@ -431,6 +467,13 @@ fn render_duplicate_detail(
     frame.render_widget(paragraph, area);
 }
 
+/// Extract filename for display, falling back to full path.
+fn file_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Truncate a hash string for display: "abcd1234...ef567890"
 fn truncate_hash(hex: &str) -> String {
     if hex.len() > 16 {
@@ -451,6 +494,237 @@ fn format_system_time(time: std::time::SystemTime) -> String {
             format!("~{}", years)
         })
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+// ============================================================================
+// SCREEN: SIMPLE LIST (orphans, diverged, skipped)
+// ============================================================================
+
+fn render_simple_list(items: &[String], cursor: usize, frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let is_cursor = i == cursor;
+        let line = if is_cursor {
+            Line::from(format!("  > {}", item)).style(theme::STYLE_CURSOR)
+        } else {
+            Line::from(format!("    {}", item))
+        };
+        lines.push(line);
+    }
+
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled("  (empty)", theme::STYLE_DIM)));
+    }
+
+    let visible_height = area.height as usize;
+    let scroll_offset = if cursor >= visible_height {
+        cursor - visible_height + 1
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines).scroll((scroll_offset as u16, 0));
+    frame.render_widget(paragraph, area);
+}
+
+// ============================================================================
+// SCREEN: CONFIRM
+// ============================================================================
+
+fn render_confirm(
+    report: &ScanReport,
+    group_indices: &[usize],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let files: Vec<&std::path::Path> = group_indices
+        .iter()
+        .filter_map(|&i| report.confirmed_duplicates.get(i))
+        .flat_map(|g| g.duplicates.iter())
+        .map(|p| p.as_path())
+        .collect();
+
+    let total_size: u64 = files
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled("  You're about to quarantine:", theme::STYLE_WARNING)),
+        Line::from(""),
+        Line::from(format!(
+            "    {} files ({}) from {} duplicate group{}",
+            files.len(),
+            format_size(total_size, BINARY),
+            group_indices.len(),
+            if group_indices.len() == 1 { "" } else { "s" }
+        )),
+        Line::from(""),
+    ];
+
+    // File list
+    let max_show = 10;
+    for (i, path) in files.iter().enumerate() {
+        if i >= max_show {
+            lines.push(Line::from(Span::styled(
+                format!("    ...{} more", files.len() - max_show),
+                theme::STYLE_DIM,
+            )));
+            break;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        lines.push(Line::from(format!("    {}", name)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  This is REVERSIBLE. Run `restore --all` to undo.",
+        theme::STYLE_SAFE,
+    )));
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+// ============================================================================
+// SCREEN: PROGRESS
+// ============================================================================
+
+fn render_progress(
+    done: usize,
+    total: usize,
+    current: Option<&Path>,
+    errors: &[(PathBuf, String)],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let pct = if total > 0 {
+        (done * 100) / total
+    } else {
+        0
+    };
+
+    // Build a text-based progress bar
+    let bar_width = 40;
+    let filled = if total > 0 {
+        (done * bar_width) / total
+    } else {
+        0
+    };
+    let empty = bar_width - filled;
+    let bar = format!(
+        "[{}{}] {}%",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        pct
+    );
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  {}", bar), theme::STYLE_PROGRESS)),
+        Line::from(""),
+    ];
+
+    if let Some(path) = current {
+        lines.push(Line::from(format!("  Current: {}", file_display_name(path))));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  ✓  {} moved", done), theme::STYLE_SAFE),
+    ]));
+
+    let remaining = total.saturating_sub(done);
+    lines.push(Line::from(Span::styled(
+        format!("  ◦  {} remaining", remaining),
+        theme::STYLE_DIM,
+    )));
+
+    for (path, err) in errors {
+        let name = file_display_name(path);
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ⚠  ", theme::STYLE_WARNING),
+            Span::styled(format!("Failed: {} ({})", name, err), theme::STYLE_WARNING),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+// ============================================================================
+// SCREEN: DONE
+// ============================================================================
+
+fn render_done(
+    quarantined: usize,
+    failed: usize,
+    bytes_recovered: u64,
+    errors: &[(PathBuf, String)],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "  ✓ {} file{} quarantined ({})",
+                    quarantined,
+                    if quarantined == 1 { "" } else { "s" },
+                    format_size(bytes_recovered, BINARY)
+                ),
+                theme::STYLE_SAFE,
+            ),
+        ]),
+    ];
+
+    if failed > 0 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ⚠  {} file{} skipped", failed, if failed == 1 { "" } else { "s" }),
+                theme::STYLE_WARNING,
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "  Space recovered: {}",
+        format_size(bytes_recovered, BINARY)
+    )));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ─────────────────────────────────────────────────────",
+        theme::STYLE_DIM,
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  To undo:   icloud-dedupe restore --all",
+        theme::STYLE_DIM,
+    )));
+    lines.push(Line::from(Span::styled(
+        "  To purge:  icloud-dedupe purge",
+        theme::STYLE_DIM,
+    )));
+
+    for (path, err) in errors {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  Error: {} — {}", path.display(), err),
+            theme::STYLE_WARNING,
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 // ============================================================================
@@ -603,6 +877,113 @@ mod tests {
 
         let tiny = "abcdef01";
         assert_eq!(truncate_hash(tiny), "abcdef01");
+    }
+
+    #[test]
+    fn orphan_list_renders() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::OrphanList { cursor: 0 };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("orphan.txt"));
+    }
+
+    #[test]
+    fn confirm_screen_renders() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::Confirm {
+            group_indices: vec![0],
+        };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("quarantine"), "Should mention quarantine");
+        assert!(content.contains("REVERSIBLE"), "Should mention reversibility");
+    }
+
+    #[test]
+    fn progress_screen_renders() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::Progress {
+            done: 3,
+            total: 10,
+            current: Some(PathBuf::from("test.pdf")),
+            errors: vec![],
+        };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("30%"), "Should show percentage");
+        assert!(content.contains("test.pdf"), "Should show current file");
+    }
+
+    #[test]
+    fn done_screen_renders() {
+        let mut terminal = make_terminal();
+        let mut app = App::with_report(report_with_data());
+        app.screen = Screen::Done {
+            quarantined: 5,
+            failed: 1,
+            bytes_recovered: 1_048_576,
+            errors: vec![],
+        };
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        assert!(content.contains("5 files quarantined"), "Should show count");
+        assert!(content.contains("restore"), "Should mention restore");
+    }
+
+    #[test]
+    fn all_screens_render_without_panic() {
+        let mut terminal = make_terminal();
+        let report = report_with_data();
+        let screens = vec![
+            Screen::Scanning { candidates_found: 10 },
+            Screen::Overview,
+            Screen::DuplicateList { cursor: 0, selected: Default::default() },
+            Screen::DuplicateDetail { group_index: 0 },
+            Screen::OrphanList { cursor: 0 },
+            Screen::DivergedList { cursor: 0 },
+            Screen::SkippedList { cursor: 0 },
+            Screen::Confirm { group_indices: vec![0] },
+            Screen::Progress { done: 5, total: 10, current: None, errors: vec![] },
+            Screen::Done { quarantined: 5, failed: 0, bytes_recovered: 0, errors: vec![] },
+        ];
+        for screen in screens {
+            let app = App {
+                screen,
+                report: Some(report.clone()),
+                should_quit: false,
+            };
+            terminal
+                .draw(|frame| render(&app, frame))
+                .expect("every screen should render without panic");
+        }
     }
 
     #[test]
