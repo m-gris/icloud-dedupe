@@ -624,4 +624,69 @@ mod tests {
         };
         assert_eq!(update(screen, &Action::Quit, &empty_report()), Transition::Quit);
     }
+
+    // -- Background event handler --
+
+    #[test]
+    fn scan_progress_updates_scanning_screen() {
+        let mut app = App::scanning();
+        handle_background_event(&mut app, AppEvent::ScanProgress {
+            files_scanned: 500,
+            candidates_found: 12,
+        });
+        assert_eq!(app.screen, Screen::Scanning { candidates_found: 12 });
+        assert!(app.report.is_none());
+    }
+
+    #[test]
+    fn scan_progress_accumulates() {
+        let mut app = App::scanning();
+        handle_background_event(&mut app, AppEvent::ScanProgress {
+            files_scanned: 100,
+            candidates_found: 3,
+        });
+        handle_background_event(&mut app, AppEvent::ScanProgress {
+            files_scanned: 500,
+            candidates_found: 12,
+        });
+        assert_eq!(app.screen, Screen::Scanning { candidates_found: 12 });
+    }
+
+    #[test]
+    fn scan_complete_stores_report_and_transitions_to_overview() {
+        let mut app = App::scanning();
+        let report = report_with_duplicates(3);
+        handle_background_event(&mut app, AppEvent::ScanComplete(report));
+        assert_eq!(app.screen, Screen::Overview);
+        assert!(app.report.is_some());
+        assert_eq!(app.report.as_ref().unwrap().confirmed_duplicates.len(), 3);
+    }
+
+    #[test]
+    fn scan_complete_with_empty_report_still_shows_overview() {
+        let mut app = App::scanning();
+        handle_background_event(&mut app, AppEvent::ScanComplete(ScanReport::default()));
+        assert_eq!(app.screen, Screen::Overview);
+        assert!(app.report.is_some());
+    }
+
+    #[test]
+    fn scan_error_sets_quit() {
+        let mut app = App::scanning();
+        handle_background_event(&mut app, AppEvent::ScanError("disk full".to_string()));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn scan_progress_ignored_when_not_scanning() {
+        // If we're already on Overview (e.g. late-arriving progress event),
+        // the screen should not change.
+        let mut app = App::with_report(empty_report());
+        assert_eq!(app.screen, Screen::Overview);
+        handle_background_event(&mut app, AppEvent::ScanProgress {
+            files_scanned: 999,
+            candidates_found: 50,
+        });
+        assert_eq!(app.screen, Screen::Overview);
+    }
 }
