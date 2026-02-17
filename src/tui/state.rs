@@ -11,7 +11,33 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use crossterm::event::KeyEvent;
+
 use crate::types::ScanReport;
+
+// ============================================================================
+// APP EVENTS
+// ============================================================================
+
+/// Everything the event loop can receive from its channel.
+///
+/// Two producers feed a single mpsc channel:
+/// - A key reader thread sends `Key` variants
+/// - Worker threads (scanner, quarantine) send background variants
+///
+/// The event loop dispatches: Key events go through `map_key → update`,
+/// background events go through a separate pure handler.
+#[derive(Debug)]
+pub enum AppEvent {
+    /// A terminal key event from the crossterm reader thread.
+    Key(KeyEvent),
+    /// Scanner progress: files scanned so far, candidates found so far.
+    ScanProgress { files_scanned: usize, candidates_found: usize },
+    /// Scanner finished successfully with a complete report.
+    ScanComplete(ScanReport),
+    /// Scanner failed with an error message.
+    ScanError(String),
+}
 
 // ============================================================================
 // APPLICATION STATE

@@ -3,10 +3,14 @@
 //! This is the core logic of the TUI. Fully testable without a terminal.
 //! Each screen defines which actions it accepts. Unhandled actions
 //! return the current screen unchanged (no-op).
+//!
+//! Two entry points:
+//! - `update()`: user actions (key presses) — returns Transition
+//! - `handle_background_event()`: background events (scan progress, etc.) — mutates App directly
 
 use crate::types::ScanReport;
 
-use super::state::{Action, Effect, Screen, Transition};
+use super::state::{Action, App, AppEvent, Effect, Screen, Transition};
 
 /// Pure state transition function.
 ///
@@ -247,6 +251,20 @@ fn noop(screen: Screen, action: &Action) -> Transition {
         Action::Quit => Transition::Quit,
         _ => Transition::Screen(screen),
     }
+}
+
+// ============================================================================
+// BACKGROUND EVENT HANDLER
+// ============================================================================
+
+/// Handle a background event by updating the App state in place.
+///
+/// Background events (scan progress, completion, errors) are not user actions —
+/// they don't produce Transitions. They mutate App state directly.
+/// This function is pure: it takes &mut App but performs no I/O.
+/// The effects boundary calls this when it receives a non-Key AppEvent.
+pub fn handle_background_event(app: &mut App, event: AppEvent) {
+    todo!("Phase 1: signature only — implementation in Phase 5")
 }
 
 // ============================================================================
