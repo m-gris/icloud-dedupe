@@ -21,8 +21,8 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::scanner::{find_candidates_with_progress, verify_candidate};
-use crate::types::{ScanConfig, ScanReport};
+use crate::scanner::{assemble_report, find_candidates_with_progress, verify_candidate};
+use crate::types::ScanConfig;
 
 use super::state::{Action, App, AppEvent, Screen, Transition};
 use super::update::{handle_background_event, update};
@@ -142,7 +142,6 @@ fn spawn_scanner(config: ScanConfig, tx: mpsc::Sender<AppEvent>) {
 
         // Phase 2: Verification (parallel with rayon)
         use rayon::prelude::*;
-        use crate::types::{DuplicateGroup, VerificationResult};
 
         let results: Vec<_> = candidates
             .par_iter()
@@ -150,41 +149,7 @@ fn spawn_scanner(config: ScanConfig, tx: mpsc::Sender<AppEvent>) {
             .collect();
 
         // Phase 3: Assemble report
-        let mut report = ScanReport::default();
-        for (path, result) in results {
-            match result {
-                Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
-                    let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
-                    report.bytes_recoverable += size;
-                    if let Some(group) = report
-                        .confirmed_duplicates
-                        .iter_mut()
-                        .find(|g| g.original == keep)
-                    {
-                        group.duplicates.push(remove);
-                    } else {
-                        report.confirmed_duplicates.push(DuplicateGroup {
-                            original: keep,
-                            hash,
-                            duplicates: vec![remove],
-                        });
-                    }
-                }
-                Ok(VerificationResult::OrphanedConflict { path, .. }) => {
-                    report.orphaned_conflicts.push(path);
-                }
-                Ok(VerificationResult::ContentDiverged {
-                    conflict_path,
-                    original_path,
-                    ..
-                }) => {
-                    report.content_diverged.push((conflict_path, original_path));
-                }
-                Err(e) => {
-                    report.skipped.push((path, e.to_string()));
-                }
-            }
-        }
+        let report = assemble_report(results);
 
         let _ = tx.send(AppEvent::ScanComplete(report));
     });

@@ -17,10 +17,9 @@ use icloud_dedupe::quarantine::{
     quarantine_duplicates, restore_file,
 };
 use icloud_dedupe::report::format_report;
-use icloud_dedupe::scanner::{find_candidates, find_candidates_with_progress, normalize_path, verify_candidate};
+use icloud_dedupe::scanner::{assemble_report, find_candidates, find_candidates_with_progress, normalize_path, verify_candidate};
 use icloud_dedupe::types::{
-    ConflictCandidate, DuplicateGroup, OutputFormat, QuarantineConfig, ScanConfig, ScanReport,
-    VerificationResult,
+    ConflictCandidate, OutputFormat, QuarantineConfig, ScanConfig, ScanReport,
 };
 
 #[derive(Parser)]
@@ -538,45 +537,3 @@ fn build_report(candidates: &[ConflictCandidate]) -> ScanReport {
     assemble_report(results)
 }
 
-/// Assemble report from verification results.
-fn assemble_report(results: Vec<(PathBuf, std::io::Result<VerificationResult>)>) -> ScanReport {
-    let mut report = ScanReport::default();
-
-    for (path, result) in results {
-        match result {
-            Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
-                let size = std::fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
-                report.bytes_recoverable += size;
-
-                if let Some(group) = report
-                    .confirmed_duplicates
-                    .iter_mut()
-                    .find(|g| g.original == keep)
-                {
-                    group.duplicates.push(remove);
-                } else {
-                    report.confirmed_duplicates.push(DuplicateGroup {
-                        original: keep,
-                        hash,
-                        duplicates: vec![remove],
-                    });
-                }
-            }
-            Ok(VerificationResult::OrphanedConflict { path, .. }) => {
-                report.orphaned_conflicts.push(path);
-            }
-            Ok(VerificationResult::ContentDiverged {
-                conflict_path,
-                original_path,
-                ..
-            }) => {
-                report.content_diverged.push((conflict_path, original_path));
-            }
-            Err(e) => {
-                report.skipped.push((path, e.to_string()));
-            }
-        }
-    }
-
-    report
-}

@@ -244,6 +244,52 @@ pub fn verify_candidate(candidate: &ConflictCandidate) -> io::Result<Verificatio
     }
 }
 
+/// Assemble a ScanReport from individual verification results.
+///
+/// Used by both the CLI (batch mode with rayon progress) and the TUI
+/// (scanner thread). Centralizes the grouping logic.
+pub fn assemble_report(results: Vec<(PathBuf, io::Result<VerificationResult>)>) -> ScanReport {
+    let mut report = ScanReport::default();
+
+    for (path, result) in results {
+        match result {
+            Ok(VerificationResult::ConfirmedDuplicate { keep, remove, hash }) => {
+                let size = fs::metadata(&remove).map(|m| m.len()).unwrap_or(0);
+                report.bytes_recoverable += size;
+
+                if let Some(group) = report
+                    .confirmed_duplicates
+                    .iter_mut()
+                    .find(|g| g.original == keep)
+                {
+                    group.duplicates.push(remove);
+                } else {
+                    report.confirmed_duplicates.push(DuplicateGroup {
+                        original: keep,
+                        hash,
+                        duplicates: vec![remove],
+                    });
+                }
+            }
+            Ok(VerificationResult::OrphanedConflict { path, .. }) => {
+                report.orphaned_conflicts.push(path);
+            }
+            Ok(VerificationResult::ContentDiverged {
+                conflict_path,
+                original_path,
+                ..
+            }) => {
+                report.content_diverged.push((conflict_path, original_path));
+            }
+            Err(e) => {
+                report.skipped.push((path, e.to_string()));
+            }
+        }
+    }
+
+    report
+}
+
 // ============================================================================
 // INTERNAL
 // ============================================================================
