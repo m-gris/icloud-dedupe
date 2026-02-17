@@ -28,8 +28,15 @@ use icloud_dedupe::types::{
 #[command(about = "Detect and remove iCloud sync conflict duplicates")]
 #[command(version)]
 struct Cli {
+    /// Directory to scan (default: auto-detect iCloud location)
+    path: Option<PathBuf>,
+
+    /// Maximum directory depth
+    #[arg(long)]
+    max_depth: Option<usize>,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -82,15 +89,6 @@ enum Commands {
     /// Show quarantine status and contents
     Status,
 
-    /// Interactive TUI for reviewing and quarantining duplicates
-    Interactive {
-        /// Directory to scan (default: iCloud location)
-        path: Option<PathBuf>,
-
-        /// Maximum directory depth
-        #[arg(long)]
-        max_depth: Option<usize>,
-    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -112,12 +110,12 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Scan { path, format, max_depth } => cmd_scan(path, format.into(), max_depth),
-        Commands::Quarantine { path, dry_run, max_depth } => cmd_quarantine(path, dry_run, max_depth),
-        Commands::Restore { all, id } => cmd_restore(all, id),
-        Commands::Purge { force } => cmd_purge(force),
-        Commands::Status => cmd_status(),
-        Commands::Interactive { path, max_depth } => cmd_interactive(path, max_depth),
+        None => cmd_interactive(cli.path, cli.max_depth),
+        Some(Commands::Scan { path, format, max_depth }) => cmd_scan(path, format.into(), max_depth),
+        Some(Commands::Quarantine { path, dry_run, max_depth }) => cmd_quarantine(path, dry_run, max_depth),
+        Some(Commands::Restore { all, id }) => cmd_restore(all, id),
+        Some(Commands::Purge { force }) => cmd_purge(force),
+        Some(Commands::Status) => cmd_status(),
     };
 
     match result {
