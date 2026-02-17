@@ -81,6 +81,16 @@ enum Commands {
 
     /// Show quarantine status and contents
     Status,
+
+    /// Interactive TUI for reviewing and quarantining duplicates
+    Interactive {
+        /// Directory to scan (default: iCloud location)
+        path: Option<PathBuf>,
+
+        /// Maximum directory depth
+        #[arg(long)]
+        max_depth: Option<usize>,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -107,6 +117,7 @@ fn main() -> ExitCode {
         Commands::Restore { all, id } => cmd_restore(all, id),
         Commands::Purge { force } => cmd_purge(force),
         Commands::Status => cmd_status(),
+        Commands::Interactive { path, max_depth } => cmd_interactive(path, max_depth),
     };
 
     match result {
@@ -484,6 +495,53 @@ fn cmd_status() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn cmd_interactive(path: Option<PathBuf>, max_depth: Option<usize>) -> Result<(), String> {
+    let resolved = resolve_scan_path(path)?;
+    let normalized = normalize_path(&resolved);
+
+    for warning in &normalized.warnings {
+        eprintln!("Note: {}", warning);
+    }
+
+    eprintln!("Scanning: {}", normalized.path.display());
+    eprintln!();
+
+    let config = ScanConfig {
+        roots: vec![normalized.path],
+        max_depth,
+        ..Default::default()
+    };
+
+    // Phase 1: Discovery
+    let sp = spinner("Discovering conflict patterns...");
+    let candidates = match find_candidates_with_progress(&config, |scanned, found| {
+        sp.set_message(format!(
+            "Scanned {} files, found {} candidates...",
+            scanned, found
+        ));
+    }) {
+        Ok(c) => {
+            sp.finish_with_message(format!("Found {} candidates", c.len()));
+            c
+        }
+        Err(e) => {
+            sp.finish_and_clear();
+            return Err(e.to_string());
+        }
+    };
+
+    if candidates.is_empty() {
+        println!("No conflict patterns found.");
+        return Ok(());
+    }
+
+    // Phase 2: Verification
+    let report = build_report_with_progress(&candidates);
+
+    // Phase 3: Launch TUI
+    icloud_dedupe::tui::run::run(report).map_err(|e| e.to_string())
 }
 
 // ============================================================================
